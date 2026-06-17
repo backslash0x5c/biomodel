@@ -129,21 +129,34 @@ class FiLMInteraction(nn.Module):
 
 
 class CrossAttnInteraction(nn.Module):
-    """摂動トークンと個人トークンの cross-attention（組み合わせ汎化に強い）。"""
+    """摂動トークンと個人トークンの self-attention（組み合わせ汎化に強い）。
+
+    注意: 単一の個人トークンへ cross-attention すると softmax が 1 に潰れて摂動を
+    無視する（縮退）。そこで [摂動トークン, 個人トークン] の 2 トークン列に対する
+    self-attention＋FFN（小さな Transformer ブロック）とし、摂動トークンが個人トークンを
+    参照して効果を作る。トークンは effect_dim を n_tokens に分割して複数化もできる。
+    """
 
     def __init__(self, p_dim: int, i_dim: int, effect_dim: int = 64, n_heads: int = 4):
         super().__init__()
-        self.q = nn.Linear(p_dim, effect_dim)
-        self.kv = nn.Linear(i_dim, effect_dim)
+        self.pert_proj = nn.Linear(p_dim, effect_dim)
+        self.indiv_proj = nn.Linear(i_dim, effect_dim)
+        self.type_emb = nn.Parameter(torch.randn(2, effect_dim) * 0.02)  # トークン種別
         self.attn = nn.MultiheadAttention(effect_dim, n_heads, batch_first=True)
+        self.norm1 = nn.LayerNorm(effect_dim)
+        self.norm2 = nn.LayerNorm(effect_dim)
+        self.ff = mlp(effect_dim, 2 * effect_dim, effect_dim, depth=2)
         self.out = nn.Linear(effect_dim, effect_dim)
         self.effect_dim = effect_dim
 
     def forward(self, z_pert: torch.Tensor, z_indiv: torch.Tensor) -> torch.Tensor:
-        q = self.q(z_pert).unsqueeze(1)
-        kv = self.kv(z_indiv).unsqueeze(1)
-        a, _ = self.attn(q, kv, kv)
-        return self.out(a.squeeze(1))
+        pt = self.pert_proj(z_pert) + self.type_emb[0]
+        it = self.indiv_proj(z_indiv) + self.type_emb[1]
+        tok = torch.stack([pt, it], dim=1)               # (B, 2, effect_dim)
+        a, _ = self.attn(tok, tok, tok)
+        tok = self.norm1(tok + a)
+        tok = self.norm2(tok + self.ff(tok))
+        return self.out(tok[:, 0])                        # 摂動トークンの表現を効果に
 
 
 class AdditiveInteraction(nn.Module):
@@ -161,9 +174,44 @@ class AdditiveInteraction(nn.Module):
         return self.effect(z_pert)
 
 
+class HypernetInteraction(nn.Module):
+    """z_indiv が「摂動応答ネットワークの重み」を生成（最も表現力が高い）。
+
+    個人ごとに異なる関数 f_θ を持ち、effect = f_{θ(z_indiv)}(z_pert)。
+    非線形な個人差（genotype×摂動）を最も直接に表現できるがパラメータを食う
+    （docs/02 §3, docs/08）。低次元ボトルネックで重み数を抑える。
+    """
+
+    def __init__(self, p_dim: int, i_dim: int, effect_dim: int = 64, hyper_hidden: int = 8):
+        super().__init__()
+        self.p_dim = p_dim
+        self.h = hyper_hidden
+        self.effect_dim = effect_dim
+        # 生成する重み: W1(h,p_dim), b1(h), W2(effect_dim,h), b2(effect_dim)
+        self.n_w1 = hyper_hidden * p_dim
+        self.n_b1 = hyper_hidden
+        self.n_w2 = effect_dim * hyper_hidden
+        self.n_b2 = effect_dim
+        total = self.n_w1 + self.n_b1 + self.n_w2 + self.n_b2
+        self.gen = mlp(i_dim, 2 * i_dim, total, depth=2)
+
+    def forward(self, z_pert: torch.Tensor, z_indiv: torch.Tensor) -> torch.Tensor:
+        bsz = z_pert.shape[0]
+        theta = self.gen(z_indiv)
+        i = 0
+        W1 = theta[:, i:i + self.n_w1].view(bsz, self.h, self.p_dim); i += self.n_w1
+        b1 = theta[:, i:i + self.n_b1].view(bsz, self.h); i += self.n_b1
+        W2 = theta[:, i:i + self.n_w2].view(bsz, self.effect_dim, self.h); i += self.n_w2
+        b2 = theta[:, i:i + self.n_b2].view(bsz, self.effect_dim)
+        # バッチごとに異なる重みで z_pert を写像
+        h = torch.tanh(torch.bmm(W1, z_pert.unsqueeze(-1)).squeeze(-1) + b1)  # (bsz, h)
+        return torch.bmm(W2, h.unsqueeze(-1)).squeeze(-1) + b2                # (bsz, effect_dim)
+
+
 INTERACTIONS = {
     "film": FiLMInteraction,
     "crossattn": CrossAttnInteraction,
+    "hypernet": HypernetInteraction,
     "additive": AdditiveInteraction,
 }
 
@@ -218,6 +266,43 @@ class PerturbationResponseModel(nn.Module):
         z_indiv = self.indiv_encoder(z_base, geno, cov)
         effect = self.interaction(z_pert, z_indiv)
         return self.decoder(z_base, effect)
+
+
+class CellLevelResponseModel(nn.Module):
+    """細胞レベルで処置後の発現を予測（unpaired・分布マッチング学習向け, docs/06）。
+
+    pseudobulk ではなく個々の細胞 x_ctrl から x_pert を予測する:
+        x_pert = x_ctrl + Decoder(z_cell, Φ(z_pert, z_indiv))
+    z_indiv はドナー単位（baseline pseudobulk + genotype）で計算し、同ドナー・同摂動の
+    細胞群に broadcast する。学習は予測細胞群と観測細胞群の MMD を最小化（losses.py）。
+    """
+
+    def __init__(self, n_genes: int, n_perts: int, geno_dim: int,
+                 z_dim: int = 64, p_dim: int = 32, i_dim: int = 32, effect_dim: int = 64,
+                 interaction: str = "film", use_genotype: bool = True):
+        super().__init__()
+        if interaction not in INTERACTIONS:
+            raise ValueError(f"unknown interaction {interaction!r}")
+        self.encoder = ExpressionEncoder(n_genes, z_dim=z_dim)
+        self.pert_encoder = PerturbationEncoder(n_perts, p_dim=p_dim)
+        self.indiv_encoder = IndividualEncoder(
+            geno_dim, baseline_dim=z_dim, i_dim=i_dim, use_genotype=use_genotype)
+        self.interaction = INTERACTIONS[interaction](p_dim, i_dim, effect_dim=effect_dim)
+        self.decoder = ResponseDecoder(z_dim, effect_dim, n_genes)
+        self.interaction_name = interaction
+
+    def effect_for(self, baseline_expr: torch.Tensor, geno: torch.Tensor,
+                   pert_id: torch.Tensor) -> torch.Tensor:
+        """ドナー/摂動単位の摂動効果 Φ(z_pert, z_indiv) を計算（行ごと）。"""
+        z_base = self.encoder.encode(baseline_expr)
+        z_indiv = self.indiv_encoder(z_base, geno)
+        z_pert = self.pert_encoder(pert_id)
+        return self.interaction(z_pert, z_indiv)
+
+    def forward(self, control_cells: torch.Tensor, effect: torch.Tensor) -> torch.Tensor:
+        """control 細胞 (B, n_genes) と効果 (B, effect_dim) -> 処置後細胞 (B, n_genes)。"""
+        z_cell = self.encoder.encode(control_cells)
+        return control_cells + self.decoder(z_cell, effect)
 
 
 def mgm_loss(encoder: ExpressionEncoder, cells: torch.Tensor, mask_rate: float = 0.25,

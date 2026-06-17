@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from biomodel.simulate import SimConfig, donor_split, simulate
+from biomodel.simulate import SimConfig, donor_split, sample_treated_cells, simulate
 
 
 def test_shapes():
@@ -48,3 +48,23 @@ def test_reproducible():
     a = simulate(SimConfig(seed=7))
     b = simulate(SimConfig(seed=7))
     assert np.array_equal(a.delta, b.delta)
+
+
+def test_nonlinear_gain_differs_from_linear():
+    """非線形ゲインは線形ゲインと異なる個人差構造を持つ。"""
+    lin = simulate(SimConfig(n_donors=60, nonlinear=False, seed=2))
+    non = simulate(SimConfig(n_donors=60, nonlinear=True, seed=2))
+    assert lin.gain.shape == non.gain.shape
+    assert not np.allclose(lin.gain, non.gain)
+    # どちらも個人差（ドナー間ばらつき）を持つ
+    assert np.all(non.gain.std(axis=0) > 0.05)
+
+
+def test_sample_treated_cells():
+    d = simulate(SimConfig(n_donors=8, n_genes=20, n_perts=4, n_control_cells=16))
+    rng = np.random.default_rng(0)
+    cells = sample_treated_cells(d, donor=0, pert=1, n_cells=32, rng=rng)
+    assert cells.shape == (32, 20)
+    # 処置後細胞の平均は baseline + batch_shift + true_delta に近い
+    expected = (d.baseline[0] + d._batch_shift[d.batch[0]] + d.true_delta[0, 1])
+    assert np.allclose(cells.mean(axis=0), expected, atol=0.2)

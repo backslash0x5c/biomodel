@@ -42,6 +42,11 @@ class SimConfig:
     # 説明できない（ablation が最も明快）。実際の baseline は genotype を一部反映するので
     # 既定は小さめの正値にして、genotype が「baseline を超えて」効くことを示す。
     genotype_drives_baseline: float = 0.3
+    # 個人差ゲインを非線形（genotype×摂動の固定ランダム MLP）にする。線形 ridge を
+    # 崩し、相互作用モジュール（FiLM/cross-attn/hypernet）の比較に使う（docs/08）。
+    nonlinear: bool = False
+    nonlinear_hidden: int = 16
+    gain_scale: float = 1.0      # 個人差ゲインの広がり（大きいほど個人差が強い）
     seed: int = 0
 
 
@@ -56,6 +61,7 @@ class SimData:
     gain: np.ndarray            # (n_donors, n_perts)   真の個人差ゲイン
     base_effect: np.ndarray     # (n_perts, n_genes)    集団平均的な摂動効果 v_p
     batch: np.ndarray           # (n_donors,)           batch ラベル
+    _batch_shift: np.ndarray    # (n_batches, n_genes)  batch effect（処置後細胞の生成に使用）
 
     @property
     def n_donors(self) -> int:
@@ -96,9 +102,34 @@ def simulate(config: SimConfig | None = None) -> SimData:
     P = rng.standard_normal((cfg.pert_dim, cfg.n_genes)) / np.sqrt(cfg.pert_dim)
     base_effect = u @ P                                             # (n_perts, n_genes) = v_p
 
-    # --- ★個人差: gain_{d,p} = 1 + a_p · g_d （genotype × 摂動の相互作用）---
-    a = rng.standard_normal((cfg.n_perts, cfg.geno_dim)) / np.sqrt(cfg.geno_dim)
-    gain = 1.0 + g @ a.T                                            # (n_donors, n_perts)
+    # --- ★個人差: gain_{d,p}（genotype × 摂動の相互作用）---
+    if cfg.nonlinear:
+        # 非線形ゲイン: 飽和的な 2 層 tanh MLP ＋ genotype の二次項を [g_d, u_p] に適用。
+        # genotype に強く非線形・摂動と非自明に結合するため、摂動ごとの線形 ridge
+        # （Δ ~ [1, g]）では捉えきれない。FiLM/cross-attn/hypernet の比較に使う。
+        h = cfg.nonlinear_hidden
+        inp_dim = cfg.geno_dim + cfg.pert_dim
+        W1 = rng.standard_normal((h, inp_dim))
+        b1 = rng.standard_normal(h) * 0.3
+        W2 = rng.standard_normal((h, h)) / np.sqrt(h)
+        b2 = rng.standard_normal(h) * 0.3
+        w3 = rng.standard_normal(h) / np.sqrt(h)
+        # genotype 二次相互作用（線形 ridge では表現不可）
+        Q = rng.standard_normal((cfg.n_perts, cfg.geno_dim, cfg.geno_dim)) / cfg.geno_dim
+        gg = np.broadcast_to(g[:, None, :], (cfg.n_donors, cfg.n_perts, cfg.geno_dim))
+        uu = np.broadcast_to(u[None, :, :], (cfg.n_donors, cfg.n_perts, cfg.pert_dim))
+        inp = np.concatenate([gg, uu], axis=2)
+        # 飽和させて強い非線形性を与える（pre-activation を拡大）
+        h1 = np.tanh(2.5 * (inp @ W1.T / np.sqrt(inp_dim) + b1))
+        h2 = np.tanh(2.0 * (h1 @ W2.T + b2))
+        quad = np.einsum("di,pij,dj->dp", g, Q, g)                 # (n_donors, n_perts)
+        raw = h2 @ w3 + 0.7 * quad                                 # (n_donors, n_perts)
+        raw = (raw - raw.mean()) / (raw.std() + 1e-8)
+        gain = 1.0 + cfg.gain_scale * raw
+    else:
+        # 線形ゲイン: gain_{d,p} = 1 + a_p · g_d
+        a = rng.standard_normal((cfg.n_perts, cfg.geno_dim)) / np.sqrt(cfg.geno_dim)
+        gain = 1.0 + cfg.gain_scale * (g @ a.T)                    # (n_donors, n_perts)
 
     # --- 個別化処置効果 delta_{d,p} = gain * v_p ---
     true_delta = gain[:, :, None] * base_effect[None, :, :]         # (n_donors, n_perts, n_genes)
@@ -121,7 +152,22 @@ def simulate(config: SimConfig | None = None) -> SimData:
         gain=gain.astype(np.float32),
         base_effect=base_effect.astype(np.float32),
         batch=batch.astype(np.int64),
+        _batch_shift=batch_shift.astype(np.float32),
     )
+
+
+def sample_treated_cells(data: SimData, donor: int, pert: int, n_cells: int,
+                         rng: np.random.Generator) -> np.ndarray:
+    """指定ドナー×摂動の「処置後細胞」を生成（cell-level / MMD 学習用, docs/06）。
+
+    control 細胞と対応はつかない（unpaired）。生成過程:
+        x_pert = baseline + batch_shift + true_delta_{d,p} + cell_noise
+    """
+    cfg = data.config
+    mean = (data.baseline[donor] + data._batch_shift[data.batch[donor]]
+            + data.true_delta[donor, pert])
+    noise = rng.standard_normal((n_cells, cfg.n_genes)) * cfg.cell_noise
+    return (mean[None, :] + noise).astype(np.float32)
 
 
 def donor_split(data: SimData, n_test: int = 10, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
