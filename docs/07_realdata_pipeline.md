@@ -54,12 +54,31 @@ population-mean  overall_r≈+0.60  indiv_R2≈ 0.00  rank_rho≈ 0.00
 
 raw counts からの一連の前処理を経ても、pipeline → model が連結し個人差予測まで通る。
 
-## 5. 実データ化のチェックリスト
+## 5. 実データ読込（anndata）
 
-- [ ] `load_fake_onek1k` を `load_anndata`（.h5ad）＋ genotype 読込（plink/VCF）に差し替え。
-- [ ] `obs` のカラム（donor/batch/perturbation/cell_type）を `RawScRNA` に割り当て。
+`load_anndata` は .h5ad パスまたは AnnData 風オブジェクトから `RawScRNA` を構築する。
+`obs` のカラム名で donor/batch/perturbation を指定し、control を -1 に符号化する。
+genotype は `align_genotype` で **scRNA 側の donor 順に整列**してから渡す
+（順序の対応が identifiability の前提, docs/02 §4）。
+
+```python
+from biomodel.data_pipeline import load_anndata, align_genotype, build_processed
+
+raw, meta = load_anndata("onek1k.h5ad", donor_key="individual",
+                         batch_key="pool", perturbation_key="treatment",
+                         control_value="control")
+geno = align_genotype(meta["donor_ids"], dosage_by_donor, variant_ids)  # 順序を一致させる
+proc = build_processed(raw, geno, n_hvg=2000)
+```
+
+## 6. 実データ化のチェックリスト
+
+- [x] `load_anndata`（.h5ad / AnnData）＋ `align_genotype`（donor 整列）を実装済み。
+- [ ] genotype 読込（plink/VCF → `dosage_by_donor`）を環境に合わせて実装。
+- [ ] `obs` のカラム（donor/batch/perturbation/cell_type）を正しく指定。
 - [ ] genotype のアレル方向（strand）統一・imputation・cis-window 定義。
 - [ ] `GenotypeFeaturizer` を GReX/eQTL/PGx 実装に差し替え。
-- [ ] 疎な (donor,pert) を `observed` マスクで損失・評価から除外（学習側の対応が必要）。
+- [x] 疎な (donor,pert) は `observed` マスクで学習から除外済み（`SimConfig.observed_rate`,
+      `train.py` が未観測ペアをスキップ。`run_demo.py --observed-rate` で確認可）。
 - [ ] batch/donor の交絡チェック（docs/02 §4）と leave-one-donor 分割（docs/04）。
 - [ ] 倫理・アクセス制御（dbGaP/EGA, IRB）の遵守。

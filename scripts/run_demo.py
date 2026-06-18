@@ -55,16 +55,19 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--quick", action="store_true", help="小さめ設定で高速に動作確認")
     ap.add_argument("--no-ablations", action="store_true")
+    ap.add_argument("--observed-rate", type=float, default=1.0,
+                    help="各(donor,pert)の観測率。<1 で疎な観測（未観測は学習から除外, docs/07）")
     args = ap.parse_args()
 
     if args.quick:
         # 注意: ドナー数が少ないと個人差の学習は不十分になりやすい（docs/04 §4）。
-        scfg = SimConfig(n_donors=80, n_genes=40, n_perts=10, seed=args.seed)
+        scfg = SimConfig(n_donors=80, n_genes=40, n_perts=10,
+                         observed_rate=args.observed_rate, seed=args.seed)
         args.epochs = min(args.epochs, 120)
         args.pretrain_epochs = min(args.pretrain_epochs, 15)
         args.n_test = 12
     else:
-        scfg = SimConfig(seed=args.seed)
+        scfg = SimConfig(observed_rate=args.observed_rate, seed=args.seed)
 
     print("=" * 78)
     print("個人差を予測する摂動応答モデル — leave-one-donor-out デモ")
@@ -74,7 +77,10 @@ def main() -> None:
     print(f"ドナー: train={len(train_idx)}  test={len(test_idx)}  "
           f"遺伝子={data.n_genes}  摂動={data.n_perts}  genotype次元={data.geno.shape[1]}")
     print(f"真の個人差ゲイン gain の範囲: [{data.gain.min():.2f}, {data.gain.max():.2f}] "
-          f"(1.0 から離れるほど個人差が大きい)\n")
+          f"(1.0 から離れるほど個人差が大きい)")
+    obs = data.observed_mask()
+    print(f"観測率(donor×pert): {obs.mean():.2f}  "
+          f"(学習に使う観測ペア数: {int(obs[train_idx].sum())})\n")
 
     tcfg = TrainConfig(epochs=args.epochs, pretrain_epochs=args.pretrain_epochs,
                        seed=args.seed, verbose=True)

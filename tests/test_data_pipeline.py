@@ -4,12 +4,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from biomodel.data_pipeline import (
     GenotypeFeaturizer,
+    align_genotype,
     build_processed,
+    load_anndata,
     load_fake_onek1k,
     normalize_log1p,
     processed_to_simdata,
@@ -62,3 +65,52 @@ def test_processed_to_simdata_roundtrip():
     assert data.control_cells.shape == (16, 16, 24)
     assert data.delta.shape == (16, 3, 24)
     assert np.array_equal(data.delta, data.true_delta)
+
+
+def _make_fake_adata():
+    ad = pytest.importorskip("anndata")
+    import pandas as pd
+    rng = np.random.default_rng(0)
+    n_donors, n_perts, cpc, n_genes = 6, 3, 10, 40
+    rows, donor, batch, pert = [], [], [], []
+    for d in range(n_donors):
+        for cond in ["control"] + [f"drugP{p}" for p in range(n_perts)]:
+            rows.append(rng.poisson(5, size=(cpc, n_genes)))
+            donor += [f"D{d}"] * cpc
+            batch += [f"B{d % 2}"] * cpc
+            pert += [cond] * cpc
+    X = np.concatenate(rows).astype(np.float32)
+    obs = pd.DataFrame({"donor": donor, "batch": batch, "pert": pert})
+    var = pd.DataFrame(index=[f"ENSG_{i:04d}" for i in range(n_genes)])
+    return ad.AnnData(X=X, obs=obs, var=var)
+
+
+def test_load_anndata_roundtrip():
+    pytest.importorskip("anndata")
+    adata = _make_fake_adata()
+    raw, meta = load_anndata(adata, donor_key="donor", batch_key="batch",
+                             perturbation_key="pert", control_value="control")
+    # control は -1、薬剤摂動は 0..2
+    assert set(np.unique(raw.perturbation).tolist()) == {-1, 0, 1, 2}
+    assert (raw.perturbation == -1).sum() == 6 * 10        # 6 donor × 10 control cells
+    assert len(meta["donor_ids"]) == 6
+    assert meta["pert_names"] == ["drugP0", "drugP1", "drugP2"]
+    assert raw.counts.shape == (6 * 4 * 10, 40)
+
+
+def test_anndata_to_model_arrays():
+    pytest.importorskip("anndata")
+    adata = _make_fake_adata()
+    raw, meta = load_anndata(adata, donor_key="donor", batch_key="batch",
+                             perturbation_key="pert")
+    # genotype を donor_ids 順に整列
+    rng = np.random.default_rng(1)
+    dosage = {d: rng.integers(0, 3, size=50).astype(np.float32) for d in meta["donor_ids"]}
+    geno = align_genotype(meta["donor_ids"], dosage, [f"rs{i}" for i in range(50)])
+    assert geno.dosage.shape == (6, 50)
+    proc = build_processed(raw, geno, n_hvg=24, n_cells=8,
+                           featurizer=GenotypeFeaturizer("pca", 6), seed=0)
+    assert proc.n_donors == 6 and proc.n_perts == 3 and proc.n_genes == 24
+    data = processed_to_simdata(proc)
+    assert data.control_cells.shape == (6, 8, 24)
+    assert data.observed.shape == (6, 3)

@@ -210,6 +210,7 @@ def processed_to_simdata(proc: ProcessedDataset):
         base_effect=base_effect,
         batch=proc.batch.astype(np.int64),
         _batch_shift=np.zeros((int(proc.batch.max()) + 1, proc.n_genes), dtype=np.float32),
+        observed=proc.observed.astype(np.float32),
     )
 
 
@@ -261,14 +262,74 @@ def load_fake_onek1k(n_donors: int = 80, n_genes: int = 200, n_perts: int = 6,
     return raw, geno
 
 
-def load_anndata(path: str):  # pragma: no cover - 実データ用
-    """AnnData(.h5ad) から RawScRNA を作る（scanpy/anndata が必要）。"""
-    try:
-        import anndata as ad
-    except ModuleNotFoundError as e:
-        raise ModuleNotFoundError(
-            "load_anndata には anndata が必要: pip install anndata scanpy") from e
-    adata = ad.read_h5ad(path)
-    raise NotImplementedError(
-        "実データごとに obs のカラム名（donor/batch/perturbation）を割り当てて RawScRNA を"
-        f"構築してください。読み込んだ adata: {adata.shape}")
+def _to_dense(x) -> np.ndarray:
+    """疎行列(scipy)も密 numpy に変換。"""
+    if hasattr(x, "toarray"):
+        x = x.toarray()
+    return np.asarray(x, dtype=np.float32)
+
+
+def _encode_labels(labels: list, order: list | None = None) -> tuple[np.ndarray, list]:
+    """ラベル列を整数 index に符号化。order 指定でカテゴリ順を固定。"""
+    uniq = order if order is not None else sorted(set(labels))
+    pos = {u: i for i, u in enumerate(uniq)}
+    return np.array([pos[x] for x in labels], dtype=np.int64), list(uniq)
+
+
+def load_anndata(source, *, donor_key: str, batch_key: str, perturbation_key: str,
+                 control_value="control", layer: str | None = None):
+    """AnnData(.h5ad パス) または AnnData 風オブジェクトから RawScRNA を構築。
+
+    source は (a) .h5ad パス（anndata 必要）, (b) `.X`/`.obs`/`.var_names` を持つ
+    オブジェクト（duck-typed）。obs のカラム名で donor/batch/perturbation を指定する。
+    perturbation の control_value は -1 に符号化する。戻り値: (RawScRNA, meta)。
+    meta["donor_ids"] の順序で genotype を整列させること（align_genotype）。
+    """
+    if isinstance(source, (str, bytes)) or hasattr(source, "__fspath__"):
+        try:
+            import anndata as ad
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "h5ad パス読込には anndata が必要: pip install anndata") from e
+        adata = ad.read_h5ad(source)
+    else:
+        adata = source
+
+    X = adata.layers[layer] if layer is not None else adata.X
+    counts = _to_dense(X)
+    gene_ids = [str(g) for g in list(adata.var_names)]
+    obs = adata.obs
+
+    donor_labels = list(obs[donor_key])
+    donor, donor_ids = _encode_labels(donor_labels)
+    batch, batch_ids = _encode_labels(list(obs[batch_key]))
+
+    pert_labels = list(obs[perturbation_key])
+    pert_values = sorted({p for p in pert_labels if p != control_value})
+    pos = {p: i for i, p in enumerate(pert_values)}
+    perturbation = np.array([pos.get(p, -1) if p != control_value else -1
+                             for p in pert_labels], dtype=np.int64)
+
+    cell_type = (np.array(list(obs["cell_type"]))
+                 if "cell_type" in getattr(obs, "columns", []) else None)
+
+    raw = RawScRNA(counts=counts, gene_ids=gene_ids, donor=donor, batch=batch,
+                   perturbation=perturbation, cell_type=cell_type)
+    meta = {"donor_ids": donor_ids, "batch_ids": batch_ids, "pert_names": pert_values}
+    return raw, meta
+
+
+def align_genotype(donor_ids: list, dosage_by_donor: dict, variant_ids: list) -> RawGenotype:
+    """scRNA 側の donor_ids 順に genotype を整列して RawGenotype を作る。
+
+    dosage_by_donor: {donor_id -> dosage ベクトル(np.ndarray)}。欠損ドナーは 0 埋め
+    （実運用では除外を推奨）。donor_ids と genotype の **対応付け（順序）が identifiability
+    の前提**（docs/02 §4）なので必ず明示的に整列する。
+    """
+    n_var = len(variant_ids)
+    rows = []
+    for d in donor_ids:
+        v = dosage_by_donor.get(d)
+        rows.append(np.zeros(n_var, np.float32) if v is None else np.asarray(v, np.float32))
+    return RawGenotype(dosage=np.stack(rows), variant_ids=list(variant_ids),
+                       donor_ids=list(donor_ids))

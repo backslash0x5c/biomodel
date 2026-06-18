@@ -58,11 +58,17 @@ def pretrain_encoder(model: PerturbationResponseModel, data: SimData,
 
 
 def _build_examples(data: SimData, donor_idx: np.ndarray):
-    """(donor, pert) の全組を平坦化して教師ありデータを作る。"""
+    """(donor, pert) の観測済みの組を平坦化して教師ありデータを作る。
+
+    観測マスク（data.observed）が <1 の場合、未観測ペアは学習から除外する
+    （疎な実データに対応, docs/07）。
+    """
     baseline = _donor_baseline(data)              # (n_donors, n_genes)
     d_list, p_list = np.meshgrid(donor_idx, np.arange(data.n_perts), indexing="ij")
     d_flat = d_list.reshape(-1)
     p_flat = p_list.reshape(-1)
+    keep = data.observed_mask()[d_flat, p_flat] > 0
+    d_flat, p_flat = d_flat[keep], p_flat[keep]
     X_base = baseline[d_flat]                     # (N, n_genes)
     X_geno = data.geno[d_flat]                    # (N, geno_dim)
     Y = data.delta[d_flat, p_flat]                # (N, n_genes)

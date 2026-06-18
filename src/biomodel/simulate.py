@@ -47,6 +47,8 @@ class SimConfig:
     nonlinear: bool = False
     nonlinear_hidden: int = 16
     gain_scale: float = 1.0      # 個人差ゲインの広がり（大きいほど個人差が強い）
+    # 観測率: 各 (donor, pert) が観測される確率。<1 にすると疎な観測（実データを模す）。
+    observed_rate: float = 1.0
     seed: int = 0
 
 
@@ -62,6 +64,13 @@ class SimData:
     base_effect: np.ndarray     # (n_perts, n_genes)    集団平均的な摂動効果 v_p
     batch: np.ndarray           # (n_donors,)           batch ラベル
     _batch_shift: np.ndarray    # (n_batches, n_genes)  batch effect（処置後細胞の生成に使用）
+    observed: np.ndarray | None = None  # (n_donors, n_perts) 観測フラグ（None=全観測）
+
+    def observed_mask(self) -> np.ndarray:
+        """観測フラグを返す（None の場合は全 1）。"""
+        if self.observed is None:
+            return np.ones((self.n_donors, self.n_perts), dtype=np.float32)
+        return self.observed
 
     @property
     def n_donors(self) -> int:
@@ -135,6 +144,12 @@ def simulate(config: SimConfig | None = None) -> SimData:
     true_delta = gain[:, :, None] * base_effect[None, :, :]         # (n_donors, n_perts, n_genes)
     delta = true_delta + rng.standard_normal(true_delta.shape) * cfg.delta_noise
 
+    # --- 観測マスク（疎な (donor, pert) を模す）---
+    if cfg.observed_rate < 1.0:
+        observed = (rng.random((cfg.n_donors, cfg.n_perts)) < cfg.observed_rate).astype(np.float32)
+    else:
+        observed = np.ones((cfg.n_donors, cfg.n_perts), dtype=np.float32)
+
     # --- control 細胞（MGM 事前学習・baseline 推定用）---
     cell_base = (baseline[:, None, :]
                  + batch_shift[batch][:, None, :])                  # (n_donors, 1, n_genes)
@@ -153,6 +168,7 @@ def simulate(config: SimConfig | None = None) -> SimData:
         base_effect=base_effect.astype(np.float32),
         batch=batch.astype(np.int64),
         _batch_shift=batch_shift.astype(np.float32),
+        observed=observed,
     )
 
 

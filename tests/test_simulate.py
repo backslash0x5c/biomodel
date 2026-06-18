@@ -60,6 +60,17 @@ def test_nonlinear_gain_differs_from_linear():
     assert np.all(non.gain.std(axis=0) > 0.05)
 
 
+def test_observed_mask():
+    """observed_rate<1 で疎な観測マスクが生成される。"""
+    full = simulate(SimConfig(n_donors=30, n_perts=8, seed=0))
+    assert full.observed is not None
+    assert full.observed_mask().mean() == 1.0          # 既定は全観測
+    sparse = simulate(SimConfig(n_donors=200, n_perts=10, observed_rate=0.5, seed=0))
+    rate = sparse.observed_mask().mean()
+    assert 0.4 < rate < 0.6                             # おおよそ 0.5
+    assert sparse.observed_mask().shape == (200, 10)
+
+
 def test_sample_treated_cells():
     d = simulate(SimConfig(n_donors=8, n_genes=20, n_perts=4, n_control_cells=16))
     rng = np.random.default_rng(0)

@@ -29,6 +29,36 @@ def mlp(in_dim: int, hidden: int, out_dim: int, depth: int = 2, dropout: float =
 
 
 # ---------------------------------------------------------------------------
+# batch 敵対学習（identifiability: 真の生物差 vs batch effect の分離, docs/02 §4, docs/09）
+# ---------------------------------------------------------------------------
+class _GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return -ctx.lambd * grad, None
+
+
+def grad_reverse(x: torch.Tensor, lambd: float = 1.0) -> torch.Tensor:
+    """勾配反転層（GRL）。順伝播は恒等、逆伝播で勾配の符号を反転。"""
+    return _GradReverse.apply(x, lambd)
+
+
+class BatchDiscriminator(nn.Module):
+    """表現から batch を当てる判別器。GRL と組み合わせ encoder を batch 不変にする。"""
+
+    def __init__(self, z_dim: int, n_batches: int, hidden: int = 64):
+        super().__init__()
+        self.net = mlp(z_dim, hidden, n_batches, depth=2)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return self.net(z)
+
+
+# ---------------------------------------------------------------------------
 # 段1: 発現 encoder（マスク発現予測 = MGM で事前学習可能）
 # ---------------------------------------------------------------------------
 class ExpressionEncoder(nn.Module):
