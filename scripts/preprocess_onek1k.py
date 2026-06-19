@@ -18,11 +18,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import torch  # noqa: E402
 
+import argparse  # noqa: E402
+
 from biomodel.data_pipeline import (  # noqa: E402
     GenotypeFeaturizer,
+    GReXFeaturizer,
     build_processed,
     load_fake_onek1k,
     processed_to_simdata,
+    synthesize_grex_model,
 )
 from biomodel.evaluate import evaluate_predictions, population_mean_baseline, true_delta_test  # noqa: E402
 from biomodel.model import PerturbationResponseModel  # noqa: E402
@@ -31,6 +35,11 @@ from biomodel.train import TrainConfig, predict_delta, pretrain_encoder, train_s
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--genotype-features", choices=["pca", "grex"], default="pca",
+                    help="genotype 特徴: pca フォールバック or grex(PrediXcan風, docs/02 §2)")
+    args = ap.parse_args()
+
     print("=" * 74)
     print("実データ前処理パイプライン デモ（fake OneK1K -> ProcessedDataset -> model）")
     print("=" * 74)
@@ -42,8 +51,14 @@ def main():
     print(f"      control細胞={(raw.perturbation == -1).sum()} "
           f"摂動細胞={(raw.perturbation >= 0).sum()}")
 
-    proc = build_processed(raw, geno, n_hvg=64, n_cells=64,
-                           featurizer=GenotypeFeaturizer("pca", 16), seed=0)
+    if args.genotype_features == "grex":
+        # PrediXcan 風の合成重みモデルで GReX 特徴を作る
+        grex_model = synthesize_grex_model(
+            geno.variant_ids, [f"GREXgene_{i}" for i in range(64)], snps_per_gene=8, seed=0)
+        featurizer = GReXFeaturizer(grex_model)
+    else:
+        featurizer = GenotypeFeaturizer("pca", 16)
+    proc = build_processed(raw, geno, n_hvg=64, n_cells=64, featurizer=featurizer, seed=0)
     print(f"\n[processed] donors={proc.n_donors} genes(HVG)={proc.n_genes} "
           f"perts={proc.n_perts} geno_feat={proc.geno_features.shape[1]}")
     print(f"            観測率(donor×pert)={proc.observed.mean():.2f}  "

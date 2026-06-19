@@ -31,7 +31,20 @@ $$\mathrm{MMD}^2(\hat{P}, P) = \mathbb{E}_{x,x'}[k(x,x')] + \mathbb{E}_{y,y'}[k(
 
 - $x \sim \hat{P}^{\text{pert}}$（予測処置後細胞）、$y \sim P^{\text{pert}}$（観測処置後細胞）。
 - バンド幅は中央値ヒューリスティックで正規化し複数スケールを合算（スケール頑健）。
-- 代替: エネルギー距離 / Sinkhorn(最適輸送)。評価には `energy_distance` を用意。
+- 代替: エネルギー距離 / **Sinkhorn(最適輸送)**。評価には `energy_distance` を用意。
+
+### 3.1 Sinkhorn（最適輸送）損失（`losses.sinkhorn_divergence`）
+
+MMD の代替として、エントロピー正則化 OT の **debiased Sinkhorn divergence** も使える:
+
+$$S_\varepsilon(\hat{P}, P) = \mathrm{OT}_\varepsilon(\hat{P}, P)
+  - \tfrac{1}{2}\mathrm{OT}_\varepsilon(\hat{P}, \hat{P})
+  - \tfrac{1}{2}\mathrm{OT}_\varepsilon(P, P)$$
+
+- 二乗ユークリッドコストを中央値で正規化、log 安定化 Sinkhorn 反復で微分可能に計算。
+- `CellTrainConfig(loss_type="sinkhorn", sinkhorn_eps=…, sinkhorn_iters=…)` で切替、
+  `run_demo_celllevel.py --loss sinkhorn`。MMD と同程度に個人差を捕捉（合成データで確認）。
+- OT は geometry を考慮するため、分布の形状差に MMD より敏感な場合がある。
 
 ## 4. 学習（`src/biomodel/cell_level.py`）
 

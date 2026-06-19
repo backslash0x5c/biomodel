@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .losses import energy_distance, gaussian_mmd2
+from .losses import energy_distance, gaussian_mmd2, sinkhorn_divergence
 from .model import CellLevelResponseModel, mgm_loss
 from .simulate import SimData, sample_treated_cells
 
@@ -24,9 +24,19 @@ class CellTrainConfig:
     n_cells: int = 48          # 1 ステップあたりの細胞数（予測側・観測側それぞれ）
     pairs_per_epoch: int = 160  # 1 epoch で見る (donor, pert) ペア数の上限（速度のため）
     mask_rate: float = 0.25
+    loss_type: str = "mmd"     # "mmd" or "sinkhorn"（最適輸送, docs/06）
+    sinkhorn_eps: float = 0.1
+    sinkhorn_iters: int = 50
     seed: int = 0
     device: str = "cpu"
     verbose: bool = True
+
+
+def _dist_loss(cfg: CellTrainConfig, pred, treated):
+    """分布マッチング損失（MMD or Sinkhorn）を返す。"""
+    if cfg.loss_type == "sinkhorn":
+        return sinkhorn_divergence(pred, treated, cfg.sinkhorn_eps, cfg.sinkhorn_iters)
+    return gaussian_mmd2(pred, treated)
 
 
 def _baselines(data: SimData) -> np.ndarray:
@@ -75,12 +85,13 @@ def train_cell_level(model: CellLevelResponseModel, data: SimData,
             pid = torch.tensor([p], dtype=torch.long, device=dev)
             effect = model.effect_for(base, geno, pid).expand(cfg.n_cells, -1)
             pred = model(ctrl, effect)
-            loss = gaussian_mmd2(pred, treated)
+            loss = _dist_loss(cfg, pred, treated)
             opt.zero_grad(); loss.backward(); opt.step()
             total += loss.item()
         losses.append(total / max(len(use), 1))
         if cfg.verbose and (ep % 5 == 0 or ep == cfg.epochs - 1):
-            print(f"[cell-MMD] epoch {ep:3d}  MMD^2 {losses[-1]:.4f}")
+            tag = "Sinkhorn" if cfg.loss_type == "sinkhorn" else "MMD^2"
+            print(f"[cell-{cfg.loss_type}] epoch {ep:3d}  {tag} {losses[-1]:.4f}")
     return losses
 
 

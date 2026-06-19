@@ -114,3 +114,34 @@ def test_anndata_to_model_arrays():
     data = processed_to_simdata(proc)
     assert data.control_cells.shape == (6, 8, 24)
     assert data.observed.shape == (6, 3)
+
+
+def test_grex_featurizer():
+    from biomodel.data_pipeline import (
+        GReXFeaturizer,
+        RawGenotype,
+        synthesize_grex_model,
+    )
+    rng = np.random.default_rng(0)
+    vids = [f"rs{i}" for i in range(120)]
+    geno = RawGenotype(dosage=rng.integers(0, 3, size=(25, 120)).astype(np.float32),
+                       variant_ids=vids, donor_ids=[f"d{i}" for i in range(25)])
+    model = synthesize_grex_model(vids, [f"ENSG{i}" for i in range(40)],
+                                  snps_per_gene=6, seed=1)
+    feat = GReXFeaturizer(model)(geno)
+    assert feat.shape == (25, 40)                 # donor × GReX 遺伝子
+    assert np.all(np.isfinite(feat))
+    assert abs(feat.mean()) < 1e-3                 # 標準化済み
+    assert len(GReXFeaturizer(model).method) > 0   # method 属性で build_processed と互換
+
+
+def test_grex_in_build_processed():
+    from biomodel.data_pipeline import GReXFeaturizer, synthesize_grex_model
+    raw, geno = load_fake_onek1k(n_donors=18, n_genes=60, n_perts=3,
+                                 cells_per_cond=12, n_variants=100, seed=0)
+    model = synthesize_grex_model(geno.variant_ids,
+                                  [f"GREX_{i}" for i in range(20)], snps_per_gene=5, seed=0)
+    proc = build_processed(raw, geno, n_hvg=24, n_cells=10,
+                           featurizer=GReXFeaturizer(model), seed=0)
+    assert proc.geno_features.shape == (18, 20)
+    assert proc.meta["geno_method"] == "grex"

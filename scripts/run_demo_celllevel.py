@@ -39,6 +39,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--pretrain-epochs", type=int, default=15)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--loss", choices=["mmd", "sinkhorn"], default="mmd",
+                    help="分布マッチング損失（mmd or sinkhorn=最適輸送, docs/06）")
     ap.add_argument("--quick", action="store_true")
     args = ap.parse_args()
 
@@ -60,13 +62,14 @@ def main():
     model = CellLevelResponseModel(
         n_genes=data.n_genes, n_perts=data.n_perts, geno_dim=data.geno.shape[1],
         interaction="film", use_genotype=True)
-    cfg = CellTrainConfig(epochs=args.epochs, pretrain_epochs=args.pretrain_epochs, seed=args.seed)
+    cfg = CellTrainConfig(epochs=args.epochs, pretrain_epochs=args.pretrain_epochs,
+                          seed=args.seed, loss_type=args.loss)
     pretrain_encoder_cells(model, data, cfg)
     train_cell_level(model, data, tr, cfg)
 
     y = true_delta_test(data, te)
     pred = predict_pseudobulk_delta(model, data, te, seed=args.seed)
-    res = evaluate_predictions("cell-MMD(FiLM+geno)", y, pred)
+    res = evaluate_predictions(f"cell-{args.loss}(FiLM+geno)", y, pred)
     base = evaluate_predictions("population-mean", y, population_mean_baseline(data, tr, te))
     energy = distribution_energy(model, data, te, seed=args.seed)
 

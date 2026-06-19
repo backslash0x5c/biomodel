@@ -127,6 +127,93 @@ class GenotypeFeaturizer:
             "（docs/02 §2）。")
 
 
+# ---------------------------------------------------------------------------
+# GReX（遺伝的に制御された発現, PrediXcan/FUSION 流）特徴
+# ---------------------------------------------------------------------------
+@dataclass
+class GReXModel:
+    """PrediXcan 風の重みモデル: gene -> [(variant_id, weight), ...]。
+
+    各遺伝子の cis 領域の variant に対する弾性ネット重み（GTEx 等で事前学習）を表す。
+    GReX_j(d) = Σ_s w_{js} · dosage_{d,s}。
+    """
+    weights: dict  # gene_id -> list[(variant_id, weight)]
+
+    @property
+    def genes(self) -> list:
+        return list(self.weights.keys())
+
+
+def load_predixcan_weights(path: str, gene_col: str = "gene", variant_col: str = "rsid",
+                           weight_col: str = "weight", sep: str = "\t") -> GReXModel:
+    """PrediXcan 風の重みテーブル（gene, variant, weight 列）を GReXModel に読む。
+
+    PrediXcan の .db（sqlite の weights テーブル）を TSV/CSV にエクスポートした形式を想定。
+    pandas があれば使い、無ければ標準ライブラリで読む。
+    """
+    weights: dict = {}
+    try:
+        import pandas as pd
+        df = pd.read_csv(path, sep=sep)
+        for g, v, w in zip(df[gene_col], df[variant_col], df[weight_col]):
+            weights.setdefault(str(g), []).append((str(v), float(w)))
+    except ModuleNotFoundError:
+        import csv
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f, delimiter=sep):
+                weights.setdefault(str(row[gene_col]), []).append(
+                    (str(row[variant_col]), float(row[weight_col])))
+    return GReXModel(weights)
+
+
+def synthesize_grex_model(variant_ids: list, gene_ids: list, snps_per_gene: int = 8,
+                          seed: int = 0) -> GReXModel:
+    """合成 GReX 重みモデル（fake パイプライン用）。各遺伝子に少数の cis-SNP を割り当てる。"""
+    rng = np.random.default_rng(seed)
+    weights: dict = {}
+    for g in gene_ids:
+        k = min(snps_per_gene, len(variant_ids))
+        vs = rng.choice(len(variant_ids), size=k, replace=False)
+        weights[str(g)] = [(variant_ids[int(s)], float(rng.standard_normal())) for s in vs]
+    return GReXModel(weights)
+
+
+class GReXFeaturizer:
+    """genotype -> GReX 特徴（PrediXcan 流）。GenotypeFeaturizer と同じ callable 互換。
+
+    GReX_j(d) = Σ_s w_{js} · dosage_{d,s}。重みモデルにある遺伝子のうち、geno の variant と
+    交差する SNP のみ使用。標準化（z-score）して特徴にする。
+    """
+
+    method = "grex"
+
+    def __init__(self, model: GReXModel, standardize: bool = True):
+        self.model = model
+        self.standardize = standardize
+        self.feature_genes_: list = []
+
+    def __call__(self, geno: RawGenotype) -> np.ndarray:
+        var_pos = {v: i for i, v in enumerate(geno.variant_ids)}
+        n_donors = geno.dosage.shape[0]
+        cols, genes = [], []
+        for g, wlist in self.model.weights.items():
+            idx = [var_pos[v] for v, _ in wlist if v in var_pos]
+            w = np.array([w for v, w in wlist if v in var_pos], dtype=np.float32)
+            if len(idx) == 0:
+                continue
+            grex = geno.dosage[:, idx] @ w                  # (n_donors,)
+            cols.append(grex); genes.append(g)
+        if not cols:
+            raise ValueError("GReX モデルと genotype の variant が交差しません（ID 整合を確認）")
+        feat = np.stack(cols, axis=1).astype(np.float32)    # (n_donors, n_grex_genes)
+        if self.standardize:
+            mu = feat.mean(0, keepdims=True); sd = feat.std(0, keepdims=True)
+            sd[sd == 0] = 1.0
+            feat = (feat - mu) / sd
+        self.feature_genes_ = genes
+        return feat.astype(np.float32)
+
+
 def pseudobulk_and_delta(expr: np.ndarray, raw: RawScRNA, n_donors: int, n_perts: int,
                          n_cells: int, rng: np.random.Generator):
     """ドナーごとに control 細胞をサブサンプルし、(donor,pert) の pseudobulk delta を作る。
