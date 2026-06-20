@@ -5,7 +5,7 @@
 
 ## 1. 個人差の源と観測量
 
-$$z_{\text{indiv}} = g\big(e_{\text{geno}},\ z_{\text{donor\_baseline}},\ e_{\text{cov}}\big)$$
+$$z_{\text{indiv}} = g\big(e_{\text{geno}},\ z_{\text{baseline}},\ e_{\text{cov}}\big)$$
 
 | 源 | 観測量 | 寄与する個人差 |
 |---|---|---|

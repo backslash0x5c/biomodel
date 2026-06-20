@@ -37,9 +37,7 @@ $$\mathrm{MMD}^2(\hat{P}, P) = \mathbb{E}_{x,x'}[k(x,x')] + \mathbb{E}_{y,y'}[k(
 
 MMD の代替として、エントロピー正則化 OT の **debiased Sinkhorn divergence** も使える:
 
-$$S_\varepsilon(\hat{P}, P) = \mathrm{OT}_\varepsilon(\hat{P}, P)
-  - \tfrac{1}{2}\mathrm{OT}_\varepsilon(\hat{P}, \hat{P})
-  - \tfrac{1}{2}\mathrm{OT}_\varepsilon(P, P)$$
+$$S_\varepsilon(\hat{P}, P) = \mathrm{OT}_\varepsilon(\hat{P}, P) - \tfrac{1}{2}\mathrm{OT}_\varepsilon(\hat{P}, \hat{P}) - \tfrac{1}{2}\mathrm{OT}_\varepsilon(P, P)$$
 
 - 二乗ユークリッドコストを中央値で正規化、log 安定化 Sinkhorn 反復で微分可能に計算。
 - `CellTrainConfig(loss_type="sinkhorn", sinkhorn_eps=…, sinkhorn_iters=…)` で切替、
