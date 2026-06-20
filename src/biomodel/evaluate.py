@@ -48,6 +48,17 @@ def r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
 
 
+def benefit_scores(delta: np.ndarray, base_effect: np.ndarray) -> np.ndarray:
+    """各 (患者, 薬) の治療効果スコア = 予測応答を薬の意図する方向へ射影した量。
+
+    delta: (n_patients, n_perts, n_genes)、base_effect: (n_perts, n_genes)。
+    スコアが大きいほど「効く（responder）」、0 近傍/負は「効かない/逆効果」。
+    現実では『抑えたい疾患遺伝子プログラム』方向で定義する（ここでは薬の平均効果方向）。
+    """
+    unit = base_effect / (np.linalg.norm(base_effect, axis=1, keepdims=True) + 1e-8)
+    return np.einsum("pdg,dg->pd", delta, unit)
+
+
 @dataclass
 class EvalResult:
     name: str

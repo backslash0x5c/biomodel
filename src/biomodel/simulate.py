@@ -65,6 +65,8 @@ class SimData:
     batch: np.ndarray           # (n_donors,)           batch ラベル
     _batch_shift: np.ndarray    # (n_batches, n_genes)  batch effect（処置後細胞の生成に使用）
     observed: np.ndarray | None = None  # (n_donors, n_perts) 観測フラグ（None=全観測）
+    # 真の genotype→効き(gain) 重み (n_perts, geno_dim)。線形モードのみ。解釈性の検証用。
+    geno_gain_weights: np.ndarray | None = None
 
     def observed_mask(self) -> np.ndarray:
         """観測フラグを返す（None の場合は全 1）。"""
@@ -135,10 +137,12 @@ def simulate(config: SimConfig | None = None) -> SimData:
         raw = h2 @ w3 + 0.7 * quad                                 # (n_donors, n_perts)
         raw = (raw - raw.mean()) / (raw.std() + 1e-8)
         gain = 1.0 + cfg.gain_scale * raw
+        geno_gain_weights = None        # 非線形は単純な線形重みでは表せない
     else:
         # 線形ゲイン: gain_{d,p} = 1 + a_p · g_d
         a = rng.standard_normal((cfg.n_perts, cfg.geno_dim)) / np.sqrt(cfg.geno_dim)
         gain = 1.0 + cfg.gain_scale * (g @ a.T)                    # (n_donors, n_perts)
+        geno_gain_weights = (cfg.gain_scale * a).astype(np.float32)  # 真の genotype→効き 重み
 
     # --- 個別化処置効果 delta_{d,p} = gain * v_p ---
     true_delta = gain[:, :, None] * base_effect[None, :, :]         # (n_donors, n_perts, n_genes)
@@ -169,6 +173,7 @@ def simulate(config: SimConfig | None = None) -> SimData:
         batch=batch.astype(np.int64),
         _batch_shift=batch_shift.astype(np.float32),
         observed=observed,
+        geno_gain_weights=geno_gain_weights,
     )
 
 
