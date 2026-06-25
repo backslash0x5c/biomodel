@@ -9,5 +9,8 @@ torch>=2.0
 # 実データ読込（任意; load_anndata / .h5ad を使う場合）
 # anndata>=0.10
 
+# 図の生成（任意; scripts/make_figures.py）
+# matplotlib>=3.5
+
 # テスト（任意）
 pytest>=7.0
